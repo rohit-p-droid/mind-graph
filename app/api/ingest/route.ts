@@ -52,9 +52,16 @@ export async function POST(req: NextRequest) {
 
           // 3. Fetch existing nodes
           controller.enqueue(encoder.encode(createLogMessage("info", "🔍 Fetching existing nodes from graph...")));
-          const existingRecords = await runQuery(
-            "MATCH (n:Node) RETURN n.name AS name, n.embedding AS embedding"
-          );
+          let existingRecords: any[] = [];
+          try {
+            existingRecords = await runQuery(
+              "MATCH (n:Node) RETURN n.name AS name, n.embedding AS embedding"
+            );
+          } catch (dbErr: any) {
+            controller.enqueue(
+              encoder.encode(createLogMessage("error", `⚠️ Database connection warning: ${dbErr.message}`))
+            );
+          }
           const existingNodes: Record<string, number[]> = {};
           for (const r of existingRecords) {
             if (r.name && r.embedding) existingNodes[r.name] = r.embedding;
@@ -131,39 +138,64 @@ export async function POST(req: NextRequest) {
               const srcEmb = existingNodes[srcName] ?? newNodes[t.source];
               const dstEmb = existingNodes[dstName] ?? newNodes[t.destination];
 
-              await runQuery(
-                `
-                MERGE (s:Node {name: $srcName})
-                ON CREATE SET s.text = $srcText, s.document = $srcDoc, s.page = $srcPage,
-                              s.embedding = $srcEmb, s.uploadedAt = datetime()
-                MERGE (d:Node {name: $dstName})
-                ON CREATE SET d.text = $dstText, d.document = $dstDoc, d.page = $dstPage,
-                              d.embedding = $dstEmb, d.uploadedAt = datetime()
-                MERGE (s)-[r:RELATION {type: $relation}]->(d)
-                `,
-                {
-                  srcName,
-                  srcText: srcMeta.text,
-                  srcDoc: srcMeta.document,
-                  srcPage: srcMeta.page,
-                  srcEmb,
-                  dstName,
-                  dstText: dstMeta.text,
-                  dstDoc: dstMeta.document,
-                  dstPage: dstMeta.page,
-                  dstEmb,
-                  relation: t.relation,
-                }
-              );
+              try {
+                await runQuery(
+                  `
+                  MERGE (s:Node {name: $srcName})
+                  ON CREATE SET s.text = $srcText, s.document = $srcDoc, s.page = $srcPage,
+                                s.embedding = $srcEmb, s.uploadedAt = datetime()
+                  MERGE (d:Node {name: $dstName})
+                  ON CREATE SET d.text = $dstText, d.document = $dstDoc, d.page = $dstPage,
+                                d.embedding = $dstEmb, d.uploadedAt = datetime()
+                  MERGE (s)-[r:RELATION {type: $relation}]->(d)
+                  `,
+                  {
+                    srcName,
+                    srcText: srcMeta.text,
+                    srcDoc: srcMeta.document,
+                    srcPage: srcMeta.page,
+                    srcEmb,
+                    dstName,
+                    dstText: dstMeta.text,
+                    dstDoc: dstMeta.document,
+                    dstPage: dstMeta.page,
+                    dstEmb,
+                    relation: t.relation,
+                  }
+                );
 
-              totalTriplets++;
-              totalRelations++;
+                totalTriplets++;
+                totalRelations++;
+              } catch (err: any) {
+                controller.enqueue(
+                  encoder.encode(
+                    createLogMessage("error", `Failed to store triplet (${srcName} -[${t.relation}]-> ${dstName}): ${err.message}`)
+                  )
+                );
+              }
             }
 
             controller.enqueue(encoder.encode(createLogMessage("debug", `Stored ${triplets.length} relations to graph`)));
           }
 
           controller.enqueue(encoder.encode(createLogMessage("success", `✅ Ingestion complete!`)));
+          
+          // Verify nodes were stored
+          try {
+            const verifyRecords = await runQuery(
+              "MATCH (n:Node {document: $doc}) RETURN count(n) AS nodeCount",
+              { doc: documentName }
+            );
+            const verifyCount = verifyRecords[0]?.nodeCount || 0;
+            controller.enqueue(
+              encoder.encode(createLogMessage("debug", `✓ Verified ${verifyCount} nodes stored in database for "${documentName}"`))
+            );
+          } catch (verifyErr: any) {
+            controller.enqueue(
+              encoder.encode(createLogMessage("error", `Warning: Could not verify nodes: ${verifyErr.message}`))
+            );
+          }
+
           controller.enqueue(
             encoder.encode(
               createLogMessage("summary", "Summary", {

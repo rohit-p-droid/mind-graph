@@ -69,6 +69,7 @@ export default function Home() {
     setUploadStatus(null);
     setLogs([]);
     setShowLogs(true);
+    setQueryLogs([]); // Clear query logs when starting upload
 
     const formData = new FormData();
     formData.append("file", file);
@@ -109,7 +110,12 @@ export default function Home() {
         });
       }
 
+      // Fetch documents and wait for completion
       await fetchDocuments();
+      // Keep logs modal open briefly so user can see completion, then auto-close after 2 seconds
+      setTimeout(() => {
+        setShowLogs(false);
+      }, 2000);
     } catch (err: any) {
       setUploadStatus({ type: "error", msg: err.message ?? "Upload failed." });
       setLogs((prev) => [...prev, { type: "error", message: err.message, timestamp: new Date().toISOString() }]);
@@ -140,10 +146,28 @@ export default function Home() {
   async function handleQuery() {
     if (!query.trim() || querying) return;
 
+    // Check if documents exist
+    if (documents.length === 0) {
+      setMessages((prev) => [
+        ...prev,
+        { 
+          role: "user", 
+          content: query 
+        },
+        {
+          role: "assistant",
+          content: "📄 No documents uploaded yet. Please upload a PDF document first to start querying the knowledge graph. Once you upload a document, I'll be able to answer questions based on its content.",
+        },
+      ]);
+      setQuery("");
+      return;
+    }
+
     const userMsg: Message = { role: "user", content: query };
     setMessages((prev) => [...prev, userMsg]);
     setQuery("");
     setQuerying(true);
+    setLogs([]); // Clear upload logs when starting query
     setQueryLogs([]);
     setShowLogs(true);
 

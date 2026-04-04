@@ -18,6 +18,14 @@ export async function runQuery(cypher: string, params: Record<string, any> = {})
   try {
     const result = await session.run(cypher, params);
     return result.records.map((r) => r.toObject());
+  } catch (err: any) {
+    console.error("Neo4j Query Error:", {
+      message: err.message,
+      code: err.code,
+      cypher: cypher.substring(0, 100),
+      params: JSON.stringify(params).substring(0, 100),
+    });
+    throw err;
   } finally {
     await session.close();
   }
