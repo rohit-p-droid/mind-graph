@@ -6,7 +6,8 @@ import { deduplicateNodes } from "@/lib/graph";
 import pdfParse from "pdf-parse";
 
 export const runtime = "nodejs";
-export const maxDuration = 120;
+export const maxDuration = 300; // Increased timeout for large documents
+export const bodyParser = false; // Disable for file uploads
 
 function createLogMessage(type: string, message: string, data?: any) {
   return `data: ${JSON.stringify({ type, message, data, timestamp: new Date().toISOString() })}\n\n`;
@@ -127,49 +128,46 @@ export async function POST(req: NextRequest) {
             // Deduplicate
             const canonicalMap = deduplicateNodes(existingNodes, newNodes);
 
-            // Store triplets in Neo4j
-            for (const t of triplets) {
-              const srcName = canonicalMap[t.source] ?? t.source;
-              const dstName = canonicalMap[t.destination] ?? t.destination;
+            // Batch store triplets in Neo4j (much faster than individual queries)
+            const tripletParams = triplets.map(t => ({
+              srcName: canonicalMap[t.source] ?? t.source,
+              dstName: canonicalMap[t.destination] ?? t.destination,
+              srcMeta: nodeMetadata[t.source] ?? { text: chunk, document: documentName, page },
+              dstMeta: nodeMetadata[t.destination] ?? { text: chunk, document: documentName, page },
+              srcEmb: existingNodes[canonicalMap[t.source] ?? t.source] ?? newNodes[t.source],
+              dstEmb: existingNodes[canonicalMap[t.destination] ?? t.destination] ?? newNodes[t.destination],
+              relation: t.relation,
+            }));
 
-              const srcMeta = nodeMetadata[t.source] ?? { text: chunk, document: documentName, page };
-              const dstMeta = nodeMetadata[t.destination] ?? { text: chunk, document: documentName, page };
-
-              const srcEmb = existingNodes[srcName] ?? newNodes[t.source];
-              const dstEmb = existingNodes[dstName] ?? newNodes[t.destination];
-
+            if (tripletParams.length > 0) {
               try {
+                // Batch write all triplets at once
                 await runQuery(
                   `
-                  MERGE (s:Node {name: $srcName})
-                  ON CREATE SET s.text = $srcText, s.document = $srcDoc, s.page = $srcPage,
-                                s.embedding = $srcEmb, s.uploadedAt = datetime()
-                  MERGE (d:Node {name: $dstName})
-                  ON CREATE SET d.text = $dstText, d.document = $dstDoc, d.page = $dstPage,
-                                d.embedding = $dstEmb, d.uploadedAt = datetime()
-                  MERGE (s)-[r:RELATION {type: $relation}]->(d)
+                  UNWIND $triplets AS triplet
+                  MERGE (s:Node {name: triplet.srcName})
+                  ON CREATE SET s.text = triplet.srcMeta.text, s.document = triplet.srcMeta.document, 
+                                s.page = triplet.srcMeta.page, s.embedding = triplet.srcEmb, 
+                                s.uploadedAt = datetime()
+                  MERGE (d:Node {name: triplet.dstName})
+                  ON CREATE SET d.text = triplet.dstMeta.text, d.document = triplet.dstMeta.document, 
+                                d.page = triplet.dstMeta.page, d.embedding = triplet.dstEmb, 
+                                d.uploadedAt = datetime()
+                  MERGE (s)-[r:RELATION {type: triplet.relation}]->(d)
+                  RETURN count(r) AS relationCount
                   `,
-                  {
-                    srcName,
-                    srcText: srcMeta.text,
-                    srcDoc: srcMeta.document,
-                    srcPage: srcMeta.page,
-                    srcEmb,
-                    dstName,
-                    dstText: dstMeta.text,
-                    dstDoc: dstMeta.document,
-                    dstPage: dstMeta.page,
-                    dstEmb,
-                    relation: t.relation,
-                  }
+                  { triplets: tripletParams }
                 );
 
-                totalTriplets++;
-                totalRelations++;
+                totalTriplets += triplets.length;
+                totalRelations += triplets.length;
+                controller.enqueue(
+                  encoder.encode(createLogMessage("success", `✓ Batch stored ${triplets.length} relations to graph`))
+                );
               } catch (err: any) {
                 controller.enqueue(
                   encoder.encode(
-                    createLogMessage("error", `Failed to store triplet (${srcName} -[${t.relation}]-> ${dstName}): ${err.message}`)
+                    createLogMessage("error", `Failed to batch store triplets: ${err.message}`)
                   )
                 );
               }
@@ -285,43 +283,36 @@ export async function POST(req: NextRequest) {
       // Deduplicate
       const canonicalMap = deduplicateNodes(existingNodes, newNodes);
 
-      // Store triplets in Neo4j
-      for (const t of triplets) {
-        const srcName = canonicalMap[t.source] ?? t.source;
-        const dstName = canonicalMap[t.destination] ?? t.destination;
+      // Batch store triplets in Neo4j (much faster than individual queries)
+      const tripletParams = triplets.map(t => ({
+        srcName: canonicalMap[t.source] ?? t.source,
+        dstName: canonicalMap[t.destination] ?? t.destination,
+        srcMeta: nodeMetadata[t.source] ?? { text: chunk, document: documentName, page },
+        dstMeta: nodeMetadata[t.destination] ?? { text: chunk, document: documentName, page },
+        srcEmb: existingNodes[canonicalMap[t.source] ?? t.source] ?? newNodes[t.source],
+        dstEmb: existingNodes[canonicalMap[t.destination] ?? t.destination] ?? newNodes[t.destination],
+        relation: t.relation,
+      }));
 
-        const srcMeta = nodeMetadata[t.source] ?? { text: chunk, document: documentName, page };
-        const dstMeta = nodeMetadata[t.destination] ?? { text: chunk, document: documentName, page };
-
-        const srcEmb = existingNodes[srcName] ?? newNodes[t.source];
-        const dstEmb = existingNodes[dstName] ?? newNodes[t.destination];
-
+      if (tripletParams.length > 0) {
         await runQuery(
           `
-          MERGE (s:Node {name: $srcName})
-          ON CREATE SET s.text = $srcText, s.document = $srcDoc, s.page = $srcPage,
-                        s.embedding = $srcEmb, s.uploadedAt = datetime()
-          MERGE (d:Node {name: $dstName})
-          ON CREATE SET d.text = $dstText, d.document = $dstDoc, d.page = $dstPage,
-                        d.embedding = $dstEmb, d.uploadedAt = datetime()
-          MERGE (s)-[r:RELATION {type: $relation}]->(d)
+          UNWIND $triplets AS triplet
+          MERGE (s:Node {name: triplet.srcName})
+          ON CREATE SET s.text = triplet.srcMeta.text, s.document = triplet.srcMeta.document, 
+                        s.page = triplet.srcMeta.page, s.embedding = triplet.srcEmb, 
+                        s.uploadedAt = datetime()
+          MERGE (d:Node {name: triplet.dstName})
+          ON CREATE SET d.text = triplet.dstMeta.text, d.document = triplet.dstMeta.document, 
+                        d.page = triplet.dstMeta.page, d.embedding = triplet.dstEmb, 
+                        d.uploadedAt = datetime()
+          MERGE (s)-[r:RELATION {type: triplet.relation}]->(d)
+          RETURN count(r) AS relationCount
           `,
-          {
-            srcName,
-            srcText: srcMeta.text,
-            srcDoc: srcMeta.document,
-            srcPage: srcMeta.page,
-            srcEmb,
-            dstName,
-            dstText: dstMeta.text,
-            dstDoc: dstMeta.document,
-            dstPage: dstMeta.page,
-            dstEmb,
-            relation: t.relation,
-          }
+          { triplets: tripletParams }
         );
 
-        totalTriplets++;
+        totalTriplets += triplets.length;
       }
     }
 

@@ -6,7 +6,15 @@ export function getNeo4jDriver(): Driver {
   if (!driver) {
     driver = neo4j.driver(
       process.env.NEO4J_URI!,
-      neo4j.auth.basic(process.env.NEO4J_USERNAME!, process.env.NEO4J_PASSWORD!)
+      neo4j.auth.basic(process.env.NEO4J_USERNAME!, process.env.NEO4J_PASSWORD!),
+      {
+        // Timeouts
+        connectionAcquisitionTimeout: 10000, // 10 seconds
+        connectionTimeout: 10000,
+        maxConnectionPoolSize: 5, // Limit connections on Vercel
+        // Use non-interactive protocol for better performance
+        disableLosslessIntegers: true,
+      }
     );
   }
   return driver;
