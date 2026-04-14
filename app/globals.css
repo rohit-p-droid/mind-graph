@@ -197,6 +197,13 @@
   letter-spacing: 0.3px;
 }
 
+.docs-header {
+  padding: 0 20px 8px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
 .docs-list {
   flex: 1;
   overflow-y: auto;

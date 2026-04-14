@@ -211,8 +211,20 @@ export async function POST(req: NextRequest) {
           controller.close();
         } catch (err: any) {
           console.error("Ingest SSE error:", err);
+          
+          // Provide helpful message for different error types
+          let errorMsg = err.message ?? "Ingestion failed";
+          
+          if (err.status === 429 || err.message?.includes("429")) {
+            errorMsg = "Rate limited by Google API. Please try again in a few moments. Consider uploading smaller documents or waiting between uploads.";
+          } else if (err.code === "ServiceUnavailable" || err.message?.includes("routing")) {
+            errorMsg = "Neo4j database is unreachable. Check your connection URI, credentials, or if the free tier instance is paused. Visit /api/health for diagnostics.";
+          } else if (err.message?.includes("Unauthorized")) {
+            errorMsg = "Neo4j authentication failed. Verify NEO4J_USERNAME and NEO4J_PASSWORD are correct.";
+          }
+          
           controller.enqueue(
-            encoder.encode(createLogMessage("error", `❌ Error: ${err.message ?? "Ingestion failed"}`))
+            encoder.encode(createLogMessage("error", `❌ Error: ${errorMsg}`))
           );
           controller.close();
         }

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { ensureNeo4jConnected } from "@/lib/neo4j";
 
 export async function GET(request: NextRequest) {
   const checks = {
@@ -7,19 +8,40 @@ export async function GET(request: NextRequest) {
       nodeEnv: process.env.NODE_ENV,
       hasGeminiKey: !!process.env.GEMINI_API_KEY,
       hasGroqKey: !!process.env.GROQ_API_KEY,
-      hasNeo4jUri: !!process.env.NEO4J_URI,
-      hasNeo4jUsername: !!process.env.NEO4J_USERNAME,
-      hasNeo4jPassword: !!process.env.NEO4J_PASSWORD,
+      neo4jConfig: {
+        hasUri: !!process.env.NEO4J_URI,
+        hasUsername: !!process.env.NEO4J_USERNAME,
+        hasPassword: !!process.env.NEO4J_PASSWORD,
+        uri: process.env.NEO4J_URI ? `${process.env.NEO4J_URI.split("://")[0]}://***` : null,
+      },
     },
     neo4j: {
       connected: false,
       error: null as string | null,
+      errorCode: null as string | null,
+      suggestions: [] as string[],
       nodeCount: 0,
       documentCount: 0,
     },
   };
 
-  // Test Neo4j connection
+  // Ensure Neo4j instance is awake (retry if paused)
+  const isAwake = await ensureNeo4jConnected();
+
+  if (!isAwake) {
+    checks.neo4j.error = "Neo4j instance is paused or unreachable";
+    checks.neo4j.errorCode = "UNAVAILABLE";
+    checks.neo4j.suggestions = [
+      "Check NEO4J_URI is correct (neo4j+s:// format)",
+      "Verify username and password are correct",
+      "Check network/firewall allows outbound connection",
+      "For free tier Aura: Resume instance from console",
+      "Check Neo4j service status page",
+    ];
+    return NextResponse.json(checks, { status: 503 });
+  }
+
+  // Test Neo4j connection with simple query
   try {
     const neo4j = require("neo4j-driver");
     const driver = neo4j.driver(
@@ -53,14 +75,43 @@ export async function GET(request: NextRequest) {
 
     await session.close();
     await driver.close();
-  } catch (error) {
+  } catch (error: any) {
+    const errorCode = error.code || error.name || "UNKNOWN";
     checks.neo4j.error =
       error instanceof Error ? error.message : "Unknown error";
+    checks.neo4j.errorCode = errorCode;
+
+    // Provide actionable suggestions based on error
+    if (errorCode === "ServiceUnavailable" || error.message?.includes("routing")) {
+      checks.neo4j.suggestions = [
+        "Instance may be paused (free tier auto-pauses after inactivity)",
+        "Check NEO4J_URI matches your database instance",
+        "Verify credentials are correct",
+        "Check firewall/VPC allows connection",
+      ];
+    } else if (error.message?.includes("Unauthorized") || errorCode === "AuthenticationFailure") {
+      checks.neo4j.suggestions = [
+        "NEO4J_USERNAME or NEO4J_PASSWORD is incorrect",
+        "Check credentials in environment variables",
+      ];
+    } else if (error.message?.includes("ECONNREFUSED")) {
+      checks.neo4j.suggestions = [
+        "Cannot connect to server at all",
+        "Check NEO4J_URI is correct",
+        "Check network connectivity",
+      ];
+    } else {
+      checks.neo4j.suggestions = [
+        `Error code: ${errorCode}`,
+        "Check Neo4j logs for more details",
+        "Consult Neo4j documentation",
+      ];
+    }
   }
 
   // Return 200 even if checks fail (so we can see what's wrong)
   return NextResponse.json(checks, {
-    status: 200,
+    status: checks.neo4j.connected ? 200 : 503,
     headers: {
       "Content-Type": "application/json",
     },

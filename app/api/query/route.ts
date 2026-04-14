@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { embedText, embedTextWithTokens, answerWithContext, answerWithContextTokens } from "@/lib/gemini";
-import { runQuery } from "@/lib/neo4j";
+import { runQuery, ensureNeo4jConnected } from "@/lib/neo4j";
 import { cosineSim, formatGraphContext } from "@/lib/graph";
 
 export const runtime = "nodejs";
@@ -20,6 +20,18 @@ export async function POST(req: NextRequest) {
     const stream = new ReadableStream({
       async start(controller) {
         try {
+          // Ensure Neo4j is awake before querying
+          const isConnected = await ensureNeo4jConnected();
+          if (!isConnected) {
+            controller.enqueue(
+              encoder.encode(
+                createLogMessage("error", "❌ Neo4j instance is paused. Please try again in a moment.")
+              )
+            );
+            controller.close();
+            return;
+          }
+
           const { query, documentName } = await req.json();
 
           if (!query) {

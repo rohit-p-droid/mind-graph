@@ -35,6 +35,7 @@ export default function Home() {
   const [queryLogs, setQueryLogs] = useState<LogEntry[]>([]);
   const [showInfoModal, setShowInfoModal] = useState(false);
   const [showContactModal, setShowContactModal] = useState(false);
+  const [isClient, setIsClient] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const chatBottomRef = useRef<HTMLDivElement>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
@@ -43,13 +44,27 @@ export default function Home() {
     try {
       const res = await fetch("/api/documents");
       const data = await res.json();
+      
+      // Handle 503 (paused instance) - retry after delay
+      if (res.status === 503) {
+        console.warn("Neo4j instance paused, retrying in 5 seconds...");
+        setTimeout(() => fetchDocuments(), 5000);
+        return;
+      }
+      
       setDocuments(data.documents ?? []);
-    } catch {}
+    } catch (err) {
+      console.error("Failed to fetch documents:", err);
+    }
   }, []);
 
   useEffect(() => {
     fetchDocuments();
   }, [fetchDocuments]);
+
+  useEffect(() => {
+    setIsClient(true);
+  }, []);
 
   useEffect(() => {
     chatBottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -301,9 +316,32 @@ export default function Home() {
             ⚠ Free Neo4j Aura has limited storage. Please delete documents after you're done to free up space.
           </div>
 
+          {isClient && (
+            <div className="warning-box">
+              🔧 <strong>Connection Issues?</strong> Visit <code style={{background: "#f0f0f0", padding: "2px 4px"}}>/api/health</code> or <code style={{background: "#f0f0f0", padding: "2px 4px"}}>/api/config</code> for diagnostics.
+            </div>
+          )}
+
           {/* Documents */}
-          <div style={{ padding: "0 20px 8px" }}>
+          <div className="docs-header">
             <div className="section-label">Uploaded Documents</div>
+            {isClient && (
+              <button
+                onClick={() => fetchDocuments()}
+                style={{
+                  background: "none",
+                  border: "none",
+                  cursor: "pointer",
+                  fontSize: "14px",
+                  padding: "4px 8px",
+                  borderRadius: "4px",
+                  color: "#6a7a8a",
+                }}
+                title="Refresh documents list"
+              >
+                🔄
+              </button>
+            )}
           </div>
 
           <div className="docs-list">
