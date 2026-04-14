@@ -7,7 +7,6 @@ import pdfParse from "pdf-parse";
 
 export const runtime = "nodejs";
 export const maxDuration = 300; // Increased timeout for large documents
-export const bodyParser = false; // Disable for file uploads
 
 function createLogMessage(type: string, message: string, data?: any) {
   return `data: ${JSON.stringify({ type, message, data, timestamp: new Date().toISOString() })}\n\n`;
