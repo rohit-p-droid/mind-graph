@@ -40,18 +40,62 @@ export default function Home() {
   const chatBottomRef = useRef<HTMLDivElement>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
 
+  // States for interactive offline warning alert
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
+  const [showInstructions, setShowInstructions] = useState(false);
+  const [diagnosing, setDiagnosing] = useState(false);
+  const [diagResults, setDiagResults] = useState<{
+    database: "checking" | "active" | "inactive";
+    api: "checking" | "active" | "inactive";
+    envKeys: "checking" | "active" | "inactive";
+  } | null>(null);
+
+  const runDiagnostics = async () => {
+    setDiagnosing(true);
+    setShowDiagnostics(true);
+    setDiagResults({
+      database: "checking",
+      api: "checking",
+      envKeys: "checking",
+    });
+
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      const res = await fetch("/api/health");
+      const data = await res.json();
+      
+      setDiagResults((prev) => prev ? { ...prev, api: "active" } : null);
+      await new Promise((resolve) => setTimeout(resolve, 600));
+
+      const isDbConnected = data.neo4j?.connected === true;
+      setDiagResults((prev) => prev ? { ...prev, database: isDbConnected ? "active" : "inactive" } : null);
+      await new Promise((resolve) => setTimeout(resolve, 600));
+
+      const hasKeys = data.environment?.hasGeminiKey && data.environment?.hasGroqKey;
+      setDiagResults((prev) => prev ? { ...prev, envKeys: hasKeys ? "active" : "inactive" } : null);
+    } catch (err) {
+      setDiagResults({
+        database: "inactive",
+        api: "inactive",
+        envKeys: "inactive",
+      });
+    } finally {
+      setDiagnosing(false);
+    }
+  };
+
   const fetchDocuments = useCallback(async () => {
     try {
       const res = await fetch("/api/documents");
       const data = await res.json();
-      
+
       // Handle 503 (paused instance) - retry after delay
       if (res.status === 503) {
         console.warn("Neo4j instance paused, retrying in 5 seconds...");
         setTimeout(() => fetchDocuments(), 5000);
         return;
       }
-      
+
       setDocuments(data.documents ?? []);
     } catch (err) {
       console.error("Failed to fetch documents:", err);
@@ -75,68 +119,10 @@ export default function Home() {
   }, [logs, queryLogs]);
 
   async function handleUpload(file: File) {
-    if (!file || file.type !== "application/pdf") {
-      setUploadStatus({ type: "error", msg: "Only PDF files are supported." });
-      return;
-    }
-
-    setUploading(true);
-    setUploadStatus(null);
-    setLogs([]);
-    setShowLogs(true);
-    setQueryLogs([]); // Clear query logs when starting upload
-
-    const formData = new FormData();
-    formData.append("file", file);
-
-    try {
-      const res = await fetch("/api/ingest?sse=true", { method: "POST", body: formData });
-
-      if (!res.body) throw new Error("No response body");
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      const newLogs: LogEntry[] = [];
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        const text = decoder.decode(value);
-        const lines = text.split("\n");
-
-        for (const line of lines) {
-          if (line.startsWith("data: ")) {
-            try {
-              const logEntry = JSON.parse(line.slice(6)) as LogEntry;
-              newLogs.push(logEntry);
-              setLogs((prev) => [...prev, logEntry]);
-            } catch {}
-          }
-        }
-      }
-
-      // Find summary log
-      const summaryLog = newLogs.find((l) => l.type === "summary");
-      if (summaryLog?.data) {
-        setUploadStatus({
-          type: "success",
-          msg: `"${summaryLog.data.document}" ingested — ${summaryLog.data.totalTriplets} triplets created.`,
-        });
-      }
-
-      // Fetch documents and wait for completion
-      await fetchDocuments();
-      // Keep logs modal open briefly so user can see completion, then auto-close after 2 seconds
-      setTimeout(() => {
-        setShowLogs(false);
-      }, 2000);
-    } catch (err: any) {
-      setUploadStatus({ type: "error", msg: err.message ?? "Upload failed." });
-      setLogs((prev) => [...prev, { type: "error", message: err.message, timestamp: new Date().toISOString() }]);
-    } finally {
-      setUploading(false);
-    }
+    setUploadStatus({
+      type: "error",
+      msg: "Action suspended: Backend server and Neo4j database are offline due to paused or unpaid hosting."
+    });
   }
 
   async function handleDelete(docName: string) {
@@ -161,104 +147,34 @@ export default function Home() {
   async function handleQuery() {
     if (!query.trim() || querying) return;
 
-    // Check if documents exist
-    if (documents.length === 0) {
-      setMessages((prev) => [
-        ...prev,
-        { 
-          role: "user", 
-          content: query 
-        },
-        {
-          role: "assistant",
-          content: "📄 No documents uploaded yet. Please upload a PDF document first to start querying the knowledge graph. Once you upload a document, I'll be able to answer questions based on its content.",
-        },
-      ]);
-      setQuery("");
-      return;
-    }
-
     const userMsg: Message = { role: "user", content: query };
-    setMessages((prev) => [...prev, userMsg]);
-    setQuery("");
-    setQuerying(true);
-    setLogs([]); // Clear upload logs when starting query
-    setQueryLogs([]);
-    setShowLogs(true);
-
-    try {
-      const res = await fetch("/api/query?sse=true", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query, documentName: selectedDoc === "all" ? undefined : selectedDoc }),
-      });
-
-      if (!res.body) throw new Error("No response body");
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let answer = "";
-      let sources: any[] = [];
-      const newLogs: LogEntry[] = [];
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        const text = decoder.decode(value);
-        const lines = text.split("\n");
-
-        for (const line of lines) {
-          if (line.startsWith("data: ")) {
-            try {
-              const logEntry = JSON.parse(line.slice(6)) as LogEntry;
-              newLogs.push(logEntry);
-              setQueryLogs((prev) => [...prev, logEntry]);
-
-              // Extract answer and sources from summary log
-              if (logEntry.type === "summary" && logEntry.data) {
-                answer = logEntry.data.answer;
-                sources = logEntry.data.sources;
-              }
-            } catch {}
-          }
-        }
-      }
-
-      // Add assistant message with answer and sources
-      const assistantMsg: Message = {
+    setMessages((prev) => [
+      ...prev,
+      userMsg,
+      {
         role: "assistant",
-        content: answer,
-        sources: sources,
-      };
-      setMessages((prev) => [...prev, assistantMsg]);
-    } catch (err: any) {
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", content: `Error: ${err.message ?? "Something went wrong."}` },
-      ]);
-      setQueryLogs((prev) => [...prev, { type: "error", message: err.message, timestamp: new Date().toISOString() }]);
-    } finally {
-      setQuerying(false);
-    }
+        content: "⚠️ Service Unavailable: Standard message processing and graph queries are suspended. The backend server and Neo4j database are currently paused or unpaid. Please run system diagnostics or check the instructions in the warning banner above."
+      }
+    ]);
+    setQuery("");
   }
 
   return (
     <>
-    <div className="app-grid">
+      <div className="app-grid">
         {/* Header */}
         <header className="header">
           <span className="header-title">Mind Graph</span>
           <div className="header-icons">
-            <button 
-              className="header-icon-btn" 
+            <button
+              className="header-icon-btn"
               title="Project Information"
               onClick={() => setShowInfoModal(true)}
             >
               ?
             </button>
-            <button 
-              className="header-icon-btn" 
+            <button
+              className="header-icon-btn"
               title="Contact Information"
               onClick={() => setShowContactModal(true)}
             >
@@ -318,7 +234,7 @@ export default function Home() {
 
           {isClient && (
             <div className="warning-box">
-              🔧 <strong>Connection Issues?</strong> Visit <code style={{background: "#f0f0f0", padding: "2px 4px"}}>/api/health</code> or <code style={{background: "#f0f0f0", padding: "2px 4px"}}>/api/config</code> for diagnostics.
+              🔧 <strong>Connection Issues?</strong> Visit <code style={{ background: "#f0f0f0", padding: "2px 4px" }}>/api/health</code> or <code style={{ background: "#f0f0f0", padding: "2px 4px" }}>/api/config</code> for diagnostics.
             </div>
           )}
 
@@ -374,6 +290,132 @@ export default function Home() {
 
         {/* Chat Panel */}
         <main className="chat-panel">
+          <div className="system-warning-banner" suppressHydrationWarning>
+            <div className="warning-banner-header">
+              <div className="warning-banner-title-group">
+                <span className="warning-banner-icon">⚠️</span>
+                <h3 className="warning-banner-title">Service Temporarily Unavailable</h3>
+              </div>
+            </div>
+            <p className="warning-banner-desc">
+              This system is temporarily unable to process messages or document uploads because the database and hosting server subscriptions are unpaid and their free tiers have been paused.
+            </p>
+            
+            <div className="warning-banner-actions">
+              <button
+                className="warning-btn warning-btn-primary"
+                onClick={runDiagnostics}
+                disabled={diagnosing}
+              >
+                {diagnosing ? (
+                  <span className="warning-spinner" />
+                ) : (
+                  <span className="warning-btn-icon">⚡</span>
+                )}
+                {diagnosing ? "Diagnosing Connection..." : "Run System Diagnostics"}
+              </button>
+
+              <button
+                className="warning-btn warning-btn-secondary"
+                onClick={() => setShowInstructions((prev) => !prev)}
+              >
+                <span className="warning-btn-icon">🔧</span>
+                {showInstructions ? "Hide Restore Guide" : "How to Restore"}
+              </button>
+            </div>
+
+            {showDiagnostics && diagResults && (
+              <div className="diagnostics-panel">
+                <h4 className="diagnostics-title">Diagnostic Check Results</h4>
+                
+                <div className="diagnostics-step">
+                  <span className="diagnostics-step-label">
+                    🖥️ Hosting API Server
+                  </span>
+                  <span className="diagnostics-step-status">
+                    {diagResults.api === "checking" ? (
+                      <span className="warning-spinner" />
+                    ) : diagResults.api === "active" ? (
+                      <>
+                        <span className="status-dot status-dot-green" />
+                        <span style={{ color: '#065f46', fontWeight: 600 }}>Active (Reachable)</span>
+                      </>
+                    ) : (
+                      <>
+                        <span className="status-dot status-dot-red" />
+                        <span style={{ color: '#991b1b', fontWeight: 600 }}>Unreachable</span>
+                      </>
+                    )}
+                  </span>
+                </div>
+
+                <div className="diagnostics-step">
+                  <span className="diagnostics-step-label">
+                    🗄️ Neo4j Graph Database
+                  </span>
+                  <span className="diagnostics-step-status">
+                    {diagResults.database === "checking" ? (
+                      <span className="warning-spinner" />
+                    ) : diagResults.database === "active" ? (
+                      <>
+                        <span className="status-dot status-dot-green" />
+                        <span style={{ color: '#065f46', fontWeight: 600 }}>Active</span>
+                      </>
+                    ) : (
+                      <>
+                        <span className="status-dot status-dot-red" />
+                        <span style={{ color: '#991b1b', fontWeight: 600 }}>Offline / Paused</span>
+                      </>
+                    )}
+                  </span>
+                </div>
+
+                <div className="diagnostics-step">
+                  <span className="diagnostics-step-label">
+                    🔑 LLM & Embeddings Keys
+                  </span>
+                  <span className="diagnostics-step-status">
+                    {diagResults.envKeys === "checking" ? (
+                      <span className="warning-spinner" />
+                    ) : diagResults.envKeys === "active" ? (
+                      <>
+                        <span className="status-dot status-dot-green" />
+                        <span style={{ color: '#065f46', fontWeight: 600 }}>Configured</span>
+                      </>
+                    ) : (
+                      <>
+                        <span className="status-dot status-dot-amber" />
+                        <span style={{ color: '#92400e', fontWeight: 600 }}>Missing API Keys</span>
+                      </>
+                    )}
+                  </span>
+                </div>
+
+                {!diagnosing && (diagResults.database === "inactive" || diagResults.api === "inactive") && (
+                  <div className="diagnostics-summary">
+                    ❌ <strong>Error:</strong> Connection to Neo4j database failed. The free tier database instance is likely paused or server hosting is suspended.
+                  </div>
+                )}
+              </div>
+            )}
+
+            {showInstructions && (
+              <div className="instructions-panel">
+                <h4 className="instructions-title">Steps to Restore the System</h4>
+                <ul className="instructions-list">
+                  <li className="instructions-item">
+                    <strong>Resume Neo4j Aura:</strong> Log into the Neo4j Aura Console and click "Resume" on your free instance, or verify database credentials in <code>.env.local</code>.
+                  </li>
+                  <li className="instructions-item">
+                    <strong>Check API Hosting:</strong> Ensure your Next.js server has correct database connection environment variables (<code>NEO4J_URI</code>, <code>NEO4J_USERNAME</code>, <code>NEO4J_PASSWORD</code>).
+                  </li>
+                  <li className="instructions-item">
+                    <strong>Verify API Keys:</strong> Confirm that <code>GEMINI_API_KEY</code> and <code>GROQ_API_KEY</code> are correctly set and have not expired.
+                  </li>
+                </ul>
+              </div>
+            )}
+          </div>
           <div className="chat-toolbar">
             <span className="toolbar-label">Scope</span>
             <select
@@ -391,9 +433,11 @@ export default function Home() {
           <div className="chat-messages">
             {messages.length === 0 ? (
               <div className="empty-chat">
-                <div className="empty-icon">⬡</div>
-                <div className="empty-text">Ask your documents anything</div>
-                <div className="empty-sub">Upload a PDF and start querying the knowledge graph</div>
+                <div className="empty-icon" style={{ opacity: 0.8, color: '#d97706' }}>⚠️</div>
+                <div className="empty-text" style={{ color: '#78350f' }}>System Offline</div>
+                <div className="empty-sub" style={{ color: '#92400e', textAlign: 'center', maxWidth: '400px' }}>
+                  The backend server and database are currently paused or unpaid. Standard queries and uploads are suspended.
+                </div>
               </div>
             ) : (
               messages.map((msg, i) => (
